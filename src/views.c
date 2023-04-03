@@ -1,7 +1,7 @@
-/* SPDX-License-Identifer: GPL-2.0-or-later
+/* SPDX-License-Identifier: GPL-2.0-or-later
 
 Copyright (C) 2014  Vyacheslav Trushkin
-Copyright (C) 2020,2021  Boian Bonev
+Copyright (C) 2020-2023  Boian Bonev
 
 This program is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation; either version 2 of the License, or (at your option) any later version.
 
@@ -33,8 +33,21 @@ inline void calc_total(struct xxxid_stats_arr *cs,double *read,double *write) {
 	}
 }
 
-#define RRV(to,from) (((to)<(from))?(~0ULL)-(to)+(from):(to)-(from))
-#define RRVf(pto,pfrom,fld) RRV(pto->fld,pfrom->fld)
+static inline uint64_t rrv(uint64_t to,uint64_t from) {
+	uint64_t result;
+
+	if (to<from) {
+		result=0;
+		result=~result;
+		result-=to;
+		result+=from;
+	} else {
+		result=0;
+		result+=to;
+		result-=from;
+	}
+	return result;
+}
 
 inline void calc_a_total(struct act_stats *act,double *read,double *write,double time_s) {
 	*read=*write=0;
@@ -43,8 +56,8 @@ inline void calc_a_total(struct act_stats *act,double *read,double *write,double
 		uint64_t r=act->read_bytes;
 		uint64_t w=act->write_bytes;
 
-		r=RRV(r,act->read_bytes_o);
-		w=RRV(w,act->write_bytes_o);
+		r=rrv(r,act->read_bytes_o);
+		w=rrv(w,act->write_bytes_o);
 		*read=(double)r/time_s;
 		*write=(double)w/time_s;
 	}
@@ -64,7 +77,7 @@ inline int value2scale(double val,double mx) {
 	return 0;
 }
 
-inline int create_diff(struct xxxid_stats_arr *cs,struct xxxid_stats_arr *ps,double time_s,filter_callback_w cb,int width,int *cnt) {
+inline int create_diff(struct xxxid_stats_arr *cs,struct xxxid_stats_arr *ps,double time_s,uint64_t ts_c,filter_callback_w cb,int width,int *cnt) {
 	int n=0;
 
 	if (cnt)
@@ -85,23 +98,29 @@ inline int create_diff(struct xxxid_stats_arr *cs,struct xxxid_stats_arr *ps,dou
 			c->write_val=0;
 			c->read_val_acc=0;
 			c->write_val_acc=0;
+			c->read_val_abw=0;
+			c->write_val_abw=0;
+			c->ts_s=ts_c; // keep start ts
+			c->ts_e=ts_c; // keep end ts
 
 			snprintf(temp,sizeof temp,"%i",c->tid);
 			maxpidlen=maxpidlen<(int)strlen(temp)?(int)strlen(temp):maxpidlen;
 			continue;
 		}
+		c->ts_s=p->ts_s; // update end ts
+		c->ts_e=ts_c; // update end ts
 
 		// round robin value
-		c->blkio_val=(double)RRVf(c,p,blkio_delay_total)/(time_s*10000000.0);
+		c->blkio_val=(double)rrv(c->blkio_delay_total,p->blkio_delay_total)/(time_s*10000000.0);
 		if (c->blkio_val>100)
 			c->blkio_val=100;
 
-		c->swapin_val=(double)RRVf(c,p,swapin_delay_total)/(time_s*10000000.0);
+		c->swapin_val=(double)rrv(c->swapin_delay_total,p->swapin_delay_total)/(time_s*10000000.0);
 		if (c->swapin_val>100)
 			c->swapin_val=100;
 
-		rv=(double)RRVf(c,p,read_bytes);
-		wv=(double)RRVf(c,p,write_bytes);
+		rv=(double)rrv(c->read_bytes,p->read_bytes);
+		wv=(double)rrv(c->write_bytes,p->write_bytes);
 
 		c->read_val=rv/time_s;
 		c->write_val=wv/time_s;
@@ -109,8 +128,17 @@ inline int create_diff(struct xxxid_stats_arr *cs,struct xxxid_stats_arr *ps,dou
 		c->read_val_acc=p->read_val_acc+rv;
 		c->write_val_acc=p->write_val_acc+wv;
 
+		c->read_val_abw=c->read_val_acc/timediff_in_s(c->ts_s,c->ts_e);
+		c->write_val_abw=c->write_val_acc/timediff_in_s(c->ts_s,c->ts_e);
+
 		memcpy(c->iohist+1,p->iohist,sizeof c->iohist-sizeof *c->iohist);
 		c->iohist[0]=value2scale(c->blkio_val,100.0);
+		memcpy(c->sihist+1,p->sihist,sizeof c->sihist-sizeof *c->sihist);
+		c->sihist[0]=value2scale(c->swapin_val,100.0);
+		memcpy(c->readhist+1,p->readhist,sizeof c->readhist-sizeof *c->readhist);
+		c->readhist[0]=rv;
+		memcpy(c->writehist+1,p->writehist,sizeof c->writehist-sizeof *c->writehist);
+		c->writehist[0]=wv;
 
 		snprintf(temp,sizeof temp,"%i",c->tid);
 		maxpidlen=maxpidlen<(int)strlen(temp)?(int)strlen(temp):maxpidlen;
@@ -127,8 +155,6 @@ inline int create_diff(struct xxxid_stats_arr *cs,struct xxxid_stats_arr *ps,dou
 			ps->arr[n]->swapin_val=0;
 			ps->arr[n]->read_val=0;
 			ps->arr[n]->write_val=0;
-			ps->arr[n]->read_val_acc=0;
-			ps->arr[n]->write_val_acc=0;
 			// copy process data to cs
 			p=malloc(sizeof *p);
 			if (p) {
@@ -144,6 +170,12 @@ inline int create_diff(struct xxxid_stats_arr *cs,struct xxxid_stats_arr *ps,dou
 				// shift history one step
 				memmove(p->iohist+1,p->iohist,sizeof p->iohist-sizeof *p->iohist);
 				p->iohist[0]=0;
+				memmove(p->sihist+1,p->sihist,sizeof p->sihist-sizeof *p->sihist);
+				p->sihist[0]=0;
+				memmove(p->readhist+1,p->readhist,sizeof p->readhist-sizeof *p->readhist);
+				p->readhist[0]=0.0;
+				memmove(p->writehist+1,p->writehist,sizeof p->writehist-sizeof *p->writehist);
+				p->writehist[0]=0.0;
 				if (arr_add(cs,p)) { // free the data in case add fails
 					if (p->cmdline1)
 						free(p->cmdline1);
@@ -187,11 +219,11 @@ inline void humanize_val(double *value,char *str,int allow_accum) {
 
 	if (config.f.kilobytes) {
 		p=1;
-		*value/=1000.0;
+		*value/=(double)config.f.base;
 	} else {
-		while (*value>10000) {
+		while (*value>config.f.base*config.f.threshold) {
 			if (p+1<strlen(u)) {
-				*value/=1000.0;
+				*value/=(double)config.f.base;
 				p++;
 			} else
 				break;
@@ -206,7 +238,6 @@ inline int iotop_sort_cb(const void *a,const void *b) {
 	struct xxxid_stats **ppa=(struct xxxid_stats **)a;
 	struct xxxid_stats **ppb=(struct xxxid_stats **)b;
 	struct xxxid_stats *pa,*pb;
-	int type=config.f.sort_by;
 	static int grlen=0;
 	int res=0;
 
@@ -218,18 +249,76 @@ inline int iotop_sort_cb(const void *a,const void *b) {
 	pa=*ppa;
 	pb=*ppb;
 
-	switch (type) {
+	switch (masked_sort_by(0)) {
 		case SORT_BY_GRAPH: {
+			double da=0,db=0;
 			int aa=0,ab=0;
 			int i;
 
-			if (grlen==0)
-				grlen=HISTORY_CNT;
-			for (i=0;i<grlen;i++) {
-				aa+=pa->iohist[i];
-				ab+=pb->iohist[i];
+			switch (masked_grtype(0)) {
+				case E_GR_IO:
+					if (grlen==0)
+						grlen=HISTORY_CNT;
+					for (i=0;i<grlen;i++) {
+						aa+=pa->iohist[i];
+						ab+=pb->iohist[i];
+					}
+					res=aa-ab;
+					break;
+				case E_GR_R:
+					if (grlen==0)
+						grlen=HISTORY_CNT;
+					for (i=0;i<grlen;i++) {
+						da+=pa->readhist[i];
+						db+=pb->readhist[i];
+					}
+					if (da>db)
+						res=1;
+					else if (da<db)
+						res=-1;
+					else
+						res=0;
+					break;
+				case E_GR_W:
+					if (grlen==0)
+						grlen=HISTORY_CNT;
+					for (i=0;i<grlen;i++) {
+						da+=pa->writehist[i];
+						db+=pb->writehist[i];
+					}
+					if (da>db)
+						res=1;
+					else if (da<db)
+						res=-1;
+					else
+						res=0;
+					break;
+				case E_GR_RW:
+					if (grlen==0)
+						grlen=HISTORY_CNT;
+					for (i=0;i<grlen;i++) {
+						da+=pa->readhist[i];
+						db+=pb->readhist[i];
+						da+=pa->writehist[i];
+						db+=pb->writehist[i];
+					}
+					if (da>db)
+						res=1;
+					else if (da<db)
+						res=-1;
+					else
+						res=0;
+					break;
+				case E_GR_SW:
+					if (grlen==0)
+						grlen=HISTORY_CNT;
+					for (i=0;i<grlen;i++) {
+						aa+=pa->sihist[i];
+						ab+=pb->sihist[i];
+					}
+					res=aa-ab;
+					break;
 			}
-			res=aa-ab;
 			break;
 		}
 		case SORT_BY_PRIO:
@@ -238,20 +327,24 @@ inline int iotop_sort_cb(const void *a,const void *b) {
 		case SORT_BY_COMMAND:
 			res=strcmp(config.f.fullcmdline?pa->cmdline2:pa->cmdline1,config.f.fullcmdline?pb->cmdline2:pb->cmdline1);
 			break;
-		case SORT_BY_PID:
+		case SORT_BY_TID:
 			res=pa->tid-pb->tid;
 			break;
 		case SORT_BY_USER:
 			res=strcmp(pa->pw_name,pb->pw_name);
 			break;
 		case SORT_BY_READ:
-			if (config.f.accumulated)
+			if (config.f.accumbw)
+				res=pa->read_val_abw>pb->read_val_abw?1:pa->read_val_abw<pb->read_val_abw?-1:0;
+			else if (config.f.accumulated)
 				res=pa->read_val_acc>pb->read_val_acc?1:pa->read_val_acc<pb->read_val_acc?-1:0;
 			else
 				res=pa->read_val>pb->read_val?1:pa->read_val<pb->read_val?-1:0;
 			break;
 		case SORT_BY_WRITE:
-			if (config.f.accumulated)
+			if (config.f.accumbw)
+				res=pa->write_val_abw>pb->write_val_abw?1:pa->write_val_abw<pb->write_val_abw?-1:0;
+			else if (config.f.accumulated)
 				res=pa->write_val_acc>pb->write_val_acc?1:pa->write_val_acc<pb->write_val_acc?-1:0;
 			else
 				res=pa->write_val>pb->write_val?1:pa->write_val<pb->write_val?-1:0;

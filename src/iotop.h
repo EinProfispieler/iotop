@@ -1,7 +1,7 @@
-/* SPDX-License-Identifer: GPL-2.0-or-later
+/* SPDX-License-Identifier: GPL-2.0-or-later
 
 Copyright (C) 2014  Vyacheslav Trushkin
-Copyright (C) 2020,2021  Boian Bonev
+Copyright (C) 2020-2023  Boian Bonev
 
 This program is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation; either version 2 of the License, or (at your option) any later version.
 
@@ -27,7 +27,17 @@ You should have received a copy of the GNU General Public License along with thi
 #include <sys/types.h>
 #include <stdint.h>
 
-#define VERSION "1.17"
+#define VERSION "1.23"
+
+typedef enum {
+	E_GR_IO,
+	E_GR_R,
+	E_GR_W,
+	E_GR_RW,
+	E_GR_SW,
+	E_GR_MIN=E_GR_IO,
+	E_GR_MAX=E_GR_SW,
+} e_grtype;
 
 typedef union {
 	struct _flags {
@@ -48,11 +58,20 @@ typedef union {
 		int hideio;
 		int hidegraph;
 		int hidecmd;
+		int deadx;
+		int hideexited;
+		int nocolor;
+		int reverse_graph;
+		int accumbw;
+		int unicode; // this and below are not part of opts
+		e_grtype grtype;
+		int helptype;
 		int sort_by;
 		int sort_order;
-		int deadx;
+		int base; // 1000 or 1024
+		int threshold; // 1..10
 	} f;
-	int opts[19];
+	int opts[22];
 } config_t;
 
 typedef struct {
@@ -84,6 +103,8 @@ struct xxxid_stats {
 	uint64_t blkio_delay_total; // nanoseconds
 	uint64_t read_bytes;
 	uint64_t write_bytes;
+	uint64_t ts_s; // start timestamp for accum-bw
+	uint64_t ts_e; // end timestamp for accum-bw
 
 	double blkio_val;
 	double swapin_val;
@@ -91,6 +112,8 @@ struct xxxid_stats {
 	double write_val;
 	double read_val_acc;
 	double write_val_acc;
+	double read_val_abw;
+	double write_val_abw;
 
 	int io_prio;
 
@@ -99,8 +122,14 @@ struct xxxid_stats {
 	char *cmdline2;
 	char *pw_name;
 
-	uint8_t iohist[HISTORY_CNT];
+	uint8_t iohist[HISTORY_CNT]; // io history data
+	uint8_t sihist[HISTORY_CNT]; // swapin history data
+	double readhist[HISTORY_CNT]; // read history data
+	double writehist[HISTORY_CNT]; // write history data
+
 	int exited; // exited>0 shows for how many refresh cycles the process is gone
+	int error_x; // netlink api did not return valid data
+	int error_i; // get_ioprio did not return valid data
 	// there is no point to keep in memory data for processes exited before HISTORY_CNT cycles
 	struct xxxid_stats_arr *threads;
 };
@@ -146,6 +175,9 @@ inline void view_curses_fini(void);
 
 inline unsigned int curses_sleep(unsigned int seconds);
 
+inline e_grtype masked_grtype(int isforward);
+inline int masked_sort_by(int isforward);
+
 /* utils.c */
 
 inline char *read_cmdline(int pid,int isshort);
@@ -156,6 +188,12 @@ inline char *esc_low_ascii(char *p);
 
 typedef void (*pg_cb)(pid_t pid,pid_t tid,void *hint1,void *hint2);
 inline void pidgen_cb(pg_cb cb,void *hint1,void *hint2);
+
+
+inline int is_a_dir(const char *p);
+inline int is_a_process(pid_t tid);
+
+inline double timediff_in_s(uint64_t sta,uint64_t end);
 
 /* ioprio.c */
 
@@ -175,7 +213,7 @@ enum {
 };
 
 enum {
-	SORT_BY_PID,
+	SORT_BY_TID,
 	SORT_BY_PRIO,
 	SORT_BY_USER,
 	SORT_BY_READ,
@@ -225,13 +263,21 @@ inline void calc_total(struct xxxid_stats_arr *cs,double *read,double *write);
 inline void calc_a_total(struct act_stats *act,double *read,double *write,double time_s);
 inline void humanize_val(double *value,char *str,int allow_accum);
 inline int iotop_sort_cb(const void *a,const void *b);
-inline int create_diff(struct xxxid_stats_arr *cs,struct xxxid_stats_arr *ps,double time_s,filter_callback_w cb,int width,int *cnt);
+inline int create_diff(struct xxxid_stats_arr *cs,struct xxxid_stats_arr *ps,double time_s,uint64_t ts_c,filter_callback_w cb,int width,int *cnt);
 inline int value2scale(double val,double mx);
 inline int filter1(struct xxxid_stats *s);
 
-#ifndef KEY_CTRL_L
-#define KEY_CTRL_L 014
-#endif
+/* delayacct.c */
+
+inline int has_task_delayacct(void);
+inline int read_task_delayacct(void);
+inline int write_task_delayacct(int da);
+
+/* configfile.c */
+
+inline int config_file_load(int *pac,char ***pav);
+inline void config_file_free(void);
+inline int config_file_save(void);
 
 #endif // __IOTOP_H__
 

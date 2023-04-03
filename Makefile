@@ -4,10 +4,10 @@
 #   make V=1
 
 #
-# SPDX-License-Identifer: GPL-2.0-or-later
+# SPDX-License-Identifier: GPL-2.0-or-later
 #
 # Copyright (C) 2014  Vyacheslav Trushkin
-# Copyright (C) 2020,2021  Boian Bonev
+# Copyright (C) 2020-2023  Boian Bonev
 #
 # This program is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation; either version 2 of the License, or (at your option) any later version.
 #
@@ -24,16 +24,16 @@ DEPS:=$(OBJS:.o=.d)
 
 ifndef NO_FLTO
 CFLAGS?=-O3 -fno-stack-protector -mno-stackrealign
-CFLAGS+=-flto
-LDFLAGS+=$(CFLAGS)
+CFLAGS+=-flto=auto
 else
 CFLAGS?=-O3 -fno-stack-protector -mno-stackrealign
 endif
 
-HAVESREA:=$(shell if $(CC) -mno-stackrealign -c /dev/null -o /dev/null >/dev/null 2>/dev/null;then echo yes;else echo no;fi)
-ifeq ("$(HAVESREA)","no")
-CFLAGS:=$(filter-out $(CFLAGS),-mno-stackrealign)
+ifdef GCCFANALIZER
+CFLAGS+=-fanalyzer
 endif
+
+INSTALL?=install
 
 PKG_CONFIG?=pkg-config
 NCCC?=$(shell $(PKG_CONFIG) --cflags ncursesw)
@@ -49,10 +49,21 @@ endif
 
 # for glibc < 2.17, -lrt is required for clock_gettime
 NEEDLRT:=$(shell if $(CC) -E glibcvertest.h -o -|grep IOTOP_NEED_LRT|grep -q yes;then echo need; fi)
+# some architectures do not have -mno-stackrealign
+HAVESREA:=$(shell if $(CC) -mno-stackrealign -xc -c /dev/null -o /dev/null >/dev/null 2>/dev/null;then echo yes;else echo no;fi)
+# old comiplers do not have -Wdate-time
+HAVEWDTI:=$(shell if $(CC) -Wdate-time -xc -c /dev/null -o /dev/null >/dev/null 2>/dev/null;then echo yes;else echo no;fi)
 
-MYCFLAGS:=$(CPPFLAGS) $(CFLAGS) $(NCCC) -std=gnu90 -Wall -Wextra -fPIE
-MYLIBS=$(LIBS) $(NCLD)
-MYLDFLAGS=$(LDFLAGS) -fPIE -pie
+MYCFLAGS:=$(CPPFLAGS) $(CFLAGS) $(NCCC) -Wall -Wextra -Wformat -Werror=format-security -Wdate-time -D_FORTIFY_SOURCE=2 --std=gnu89 -fPIE
+ifeq ("$(HAVESREA)","no")
+MYCFLAGS:=$(filter-out -mno-stackrealign,$(MYCFLAGS))
+endif
+ifeq ("$(HAVEWDTI)","no")
+MYCFLAGS:=$(filter-out -Wdate-time,$(MYCFLAGS))
+endif
+
+MYLIBS:=$(NCLD) $(LIBS)
+MYLDFLAGS:=$(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -fPIE -pie
 ifeq ("$(NEEDLRT)","need")
 MYLDFLAGS+=-lrt
 endif
@@ -88,12 +99,13 @@ install: $(TARGET)
 	$(E) STRIP $(TARGET)
 	$(Q)$(STRIP) $(TARGET)
 	$(E) INSTALL $(TARGET)
-	$(Q)install -TD -m 0755 $(TARGET) $(PREFIX)/sbin/$(TARGET)
-	$(Q)install -TD -m 0644 iotop.8 $(PREFIX)/share/man/man8/iotop.8
+	$(Q)$(INSTALL) -D -m 0755 $(TARGET) $(PREFIX)/sbin/$(TARGET)
+	$(Q)$(INSTALL) -D -m 0644 iotop.8 $(PREFIX)/share/man/man8/iotop.8
 
 uninstall:
 	$(E) UNINSTALL $(TARGET)
-	$(Q)rm $(PREFIX)/sbin/$(TARGET)
+	$(Q)rm -f $(PREFIX)/sbin/$(TARGET)
+	$(Q)rm -f $(PREFIX)/share/man/man8/iotop.8
 
 bld/.mkdir:
 	$(Q)mkdir -p bld
@@ -108,13 +120,16 @@ mkotar:
 		--exclude ./.git \
 		--exclude ./.gitignore \
 		--exclude ./debian \
-		--exclude ./fedora \
 		-Jcvf ../iotop-c_$(VER).orig.tar.xz .
 	-rm -f ../iotop-c_$(VER).orig.tar.xz.asc
 	gpg -a --detach-sign ../iotop-c_$(VER).orig.tar.xz
 	cp -fa ../iotop-c_$(VER).orig.tar.xz ../iotop-$(VER).tar.xz
 	cp -fa ../iotop-c_$(VER).orig.tar.xz.asc ../iotop-$(VER).tar.xz.asc
 
+re:
+	$(Q)$(MAKE) --no-print-directory clean
+	$(Q)$(MAKE) --no-print-directory -j
+
 -include $(DEPS)
 
-.PHONY: clean install uninstall
+.PHONY: all clean install uninstall mkotar re
